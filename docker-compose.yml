@@ -1,0 +1,110 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: stock-analysis-postgres
+    environment:
+      POSTGRES_DB: stock_analysis
+      POSTGRES_USER: stock_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stock_user -d stock_analysis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stock-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: stock-analysis-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy volatile-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stock-network
+
+  api:
+    build:
+      context: .
+      dockerfile: src/Api/Dockerfile
+    container_name: stock-analysis-api
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__DefaultConnection: Host=postgres;Database=stock_analysis;Username=stock_user;Password=${POSTGRES_PASSWORD:-changeme}
+      ConnectionStrings__Redis: redis:6379
+      Jwt__Key: ${JWT_KEY:-dev-secret-key-min-32-chars-long}
+      Jwt__Issuer: StockAnalysis
+      Jwt__Audience: StockAnalysisClients
+      TwelveData__ApiKey: ${TWELVE_DATA_API_KEY:-}
+      Gemini__ApiKey: ${GEMINI_API_KEY:-}
+    ports:
+      - "5000:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - stock-network
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: stock-analysis-web
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:5000
+      NODE_ENV: development
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    networks:
+      - stock-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: stock-analysis-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - api
+      - web
+    networks:
+      - stock-network
+
+  certbot:
+    image: certbot/certbot
+    container_name: stock-analysis-certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done'"
+    networks:
+      - stock-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  stock-network:
+    driver: bridge
